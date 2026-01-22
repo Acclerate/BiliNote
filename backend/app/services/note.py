@@ -716,6 +716,13 @@ class NoteGenerator:
 
                 logger.info(f"第 {i+1}/{num_segments} 段处理完成")
 
+                # 在段之间添加延迟，避免API速率限制
+                if i < num_segments - 1:  # 不是最后一段
+                    import time
+                    delay = 60  # 等待60秒
+                    logger.info(f"等待 {delay} 秒以避免API速率限制...")
+                    time.sleep(delay)
+
             except Exception as e:
                 logger.error(f"第 {i+1}/{num_segments} 段处理失败：{e}")
                 failed_segments.append(i + 1)
