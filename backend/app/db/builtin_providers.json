@@ -53,6 +53,14 @@
     "type": "built-in",
     "logo": "Ollama",
     "api_key": "",
-    "base_url": "http://127.0.0.1:11434/v1"
+    "base_url": "http://127.0.0.1:11434/v1"  },
+  {
+    "id": "siliconflow",
+    "name": "SiliconFlow",
+    "type": "built-in",
+    "logo": "SiliconFlow",
+    "api_key": "sk-egilnbvkifzxsneojmfrvdecygmhweevlihwrkudnxfeuzvx",
+    "base_url": "https://api.siliconflow.cn/v1",
+    "enabled": 1
   }
 ]
