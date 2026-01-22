@@ -12,15 +12,27 @@ def check_ffmpeg_exists() -> bool:
     """
     ffmpeg_bin_path = os.getenv("FFMPEG_BIN_PATH")
     logger.info(f"FFMPEG_BIN_PATH: {ffmpeg_bin_path}")
-    if ffmpeg_bin_path and os.path.isdir(ffmpeg_bin_path):
-        os.environ["PATH"] = ffmpeg_bin_path + os.pathsep + os.environ.get("PATH", "")
-        logger.info(f"ffmpeg 未配置路径，尝试使用系统路径PATH: {os.environ.get('PATH')}")
+
+    # 如果配置了 FFMPEG_BIN_PATH
+    if ffmpeg_bin_path:
+        if os.path.isfile(ffmpeg_bin_path):
+            # 是完整文件路径，直接使用
+            ffmpeg_dir = os.path.dirname(ffmpeg_bin_path)
+            os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
+            logger.info(f"使用配置的 FFmpeg 路径: {ffmpeg_bin_path}")
+        elif os.path.isdir(ffmpeg_bin_path):
+            # 是目录路径，添加到 PATH
+            os.environ["PATH"] = ffmpeg_bin_path + os.pathsep + os.environ.get("PATH", "")
+            logger.info(f"使用配置的 FFmpeg 目录: {ffmpeg_bin_path}")
+        else:
+            logger.warning(f"配置的 FFMPEG_BIN_PATH 不存在: {ffmpeg_bin_path}")
+
     try:
         subprocess.run(["ffmpeg", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
         logger.info("ffmpeg 已安装")
         return True
-    except (FileNotFoundError, OSError, subprocess.CalledProcessError):
-        logger.info("ffmpeg 未安装")
+    except (FileNotFoundError, OSError, subprocess.CalledProcessError) as e:
+        logger.info(f"ffmpeg 未安装或无法执行: {e}")
         return False
 
 
