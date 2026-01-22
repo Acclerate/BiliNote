@@ -719,12 +719,15 @@ class NoteGenerator:
                 # 在段之间添加延迟，避免API速率限制
                 if i < num_segments - 1:  # 不是最后一段
                     import time
-                    delay = 60  # 等待60秒
-                    logger.info(f"等待 {delay} 秒以避免API速率限制...")
-                    time.sleep(delay)
+                    delay = int(os.getenv("SEGMENT_DELAY", "5"))  # 从环境变量读取延迟，默认5秒
+                    if delay > 0:
+                        logger.info(f"等待 {delay} 秒以避免API速率限制...")
+                        time.sleep(delay)
 
             except Exception as e:
+                import traceback
                 logger.error(f"第 {i+1}/{num_segments} 段处理失败：{e}")
+                logger.error(f"详细错误信息：\n{traceback.format_exc()}")
                 failed_segments.append(i + 1)
                 # 继续处理下一段，而不是中断整个流程
                 continue
