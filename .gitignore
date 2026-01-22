@@ -329,3 +329,4 @@ static/screenshots/*
 *.ps1
 bili_note.db
 /backend/app/db/builtin_providers.json
+backend/app/db/builtin_providers.json
