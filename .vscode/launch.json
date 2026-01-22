@@ -5,14 +5,15 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "command": "npm start",
-            "name": "Run npm start",
+            "type": "node-terminal",
+            "name": "Backend: Python Server",
             "request": "launch",
-            "type": "node-terminal"
+            "command": "D:/ProgramData/anaconda3/Scripts/activate && conda activate py310 && D:/ProgramData/my_custom_envs/py310/python.exe ${workspaceFolder}/backend/main.py",
+            "cwd": "${workspaceFolder}"
         },
         {
             "type": "node-terminal",
-            "name": "Run Script: dev",
+            "name": "Frontend: Vite Dev Server",
             "request": "launch",
             "command": "npm run dev",
             "cwd": "${workspaceFolder}\\BillNote_frontend"

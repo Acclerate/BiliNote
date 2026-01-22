@@ -33,7 +33,7 @@ def generate_screenshot(video_path: str, output_dir: str, timestamp: int, index:
     ]
 
     print("Running command:", command)
-    result = subprocess.run(command, capture_output=True, text=True)
+    result = subprocess.run(command, capture_output=True, text=True, encoding='utf-8', errors='ignore')
 
     if result.returncode != 0:
         print("ffmpeg failed:", result.stderr)
