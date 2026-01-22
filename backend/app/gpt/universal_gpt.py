@@ -6,6 +6,8 @@ from app.gpt.utils import fix_markdown
 from app.models.transcriber_model import TranscriptSegment
 from datetime import timedelta
 from typing import List
+from app.utils.logger import get_logger
+import json as json_module
 
 
 class UniversalGPT(GPT):
@@ -15,6 +17,9 @@ class UniversalGPT(GPT):
         self.temperature = temperature
         self.screenshot = False
         self.link = False
+        self.logger = get_logger(__name__)
+        self.logger.info(f"UniversalGPT initialized with model: {model}")
+        self.logger.info(f"Client base_url: {getattr(client, 'base_url', 'unknown')}")
 
     def _format_time(self, seconds: float) -> str:
         return str(timedelta(seconds=int(seconds)))[2:]
@@ -68,6 +73,15 @@ class UniversalGPT(GPT):
         self.link = source.link
         source.segment = self.ensure_segments_type(source.segment)
 
+        # 限制图片数量，避免请求过大
+        max_images = 20
+        original_images = source.video_img_urls or []
+        limited_images = original_images[:max_images] if len(original_images) > max_images else original_images
+
+        if len(original_images) > max_images:
+            self.logger.warning(f"Images limited from {len(original_images)} to {max_images} to avoid request size issues")
+            source.video_img_urls = limited_images
+
         messages = self.create_messages(
             source.segment,
             title=source.title,
@@ -77,9 +91,23 @@ class UniversalGPT(GPT):
             style=source.style,
             extras=source.extras
         )
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            temperature=0.7
-        )
-        return response.choices[0].message.content.strip()
+
+        self.logger.info(f"Sending request to model: {self.model}")
+        self.logger.info(f"Number of segments: {len(source.segment)}")
+        self.logger.info(f"Number of images: {len(source.video_img_urls or [])}")
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=0.7,
+                max_tokens=8192  # 限制响应长度
+            )
+            result = response.choices[0].message.content.strip()
+            self.logger.info(f"Summarization successful, response length: {len(result)}")
+            return result
+        except Exception as e:
+            self.logger.error(f"Summarization failed: {type(e).__name__}: {e}")
+            # 记录请求详情用于调试
+            self.logger.error(f"Request details - Model: {self.model}, Segments: {len(source.segment)}, Images: {len(source.video_img_urls or [])}")
+            raise

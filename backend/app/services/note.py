@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 from dataclasses import asdict
 from pathlib import Path
 from typing import List, Optional, Tuple, Union, Any
@@ -35,7 +36,7 @@ from app.transcriber.transcriber_provider import get_transcriber, _transcribers
 from app.utils.note_helper import replace_content_markers
 from app.utils.status_code import StatusCode
 from app.utils.video_helper import generate_screenshot
-from app.utils.video_reader import VideoReader
+from app.utils.video_reader import VideoReader, split_video_by_duration, SEGMENT_DURATION
 
 # ------------------ 环境变量与全局配置 ------------------
 
@@ -72,6 +73,8 @@ class NoteGenerator:
         self.transcriber: Transcriber = self._init_transcriber()
         self.video_path: Optional[Path] = None
         self.video_img_urls=[]
+        self._temp_files: List[str] = []  # 跟踪临时文件
+        self._segment_dirs: List[str] = []  # 跟踪分段视频目录
         logger.info("NoteGenerator 初始化完成")
 
 
@@ -147,26 +150,42 @@ class NoteGenerator:
                 grid_size=grid_size,
             )
 
-            # 2. 转写文字
-            transcript = self._transcribe_audio(
-                audio_file=audio_meta.file_path,
-                transcript_cache_file=transcript_cache_file,
-                status_phase=TaskStatus.TRANSCRIBING,
-            )
+            # 1.5 如果需要视频理解，对视频进行分段处理
+            if video_understanding and self.video_path:
+                transcript, markdown = self._process_video_segments(
+                    video_path=str(self.video_path),
+                    audio_meta=audio_meta,
+                    gpt=gpt,
+                    task_id=task_id,
+                    link=link,
+                    screenshot=screenshot,
+                    formats=_format or [],
+                    style=style,
+                    extras=extras,
+                    grid_size=grid_size,
+                    video_interval=video_interval,
+                )
+            else:
+                # 2. 转写文字（原流程）
+                transcript = self._transcribe_audio(
+                    audio_file=audio_meta.file_path,
+                    transcript_cache_file=transcript_cache_file,
+                    status_phase=TaskStatus.TRANSCRIBING,
+                )
 
-            # 3. GPT 总结
-            markdown = self._summarize_text(
-                audio_meta=audio_meta,
-                transcript=transcript,
-                gpt=gpt,
-                markdown_cache_file=markdown_cache_file,
-                link=link,
-                screenshot=screenshot,
-                formats=_format or [],
-                style=style,
-                extras=extras,
-                video_img_urls=self.video_img_urls,
-            )
+                # 3. GPT 总结（原流程）
+                markdown = self._summarize_text(
+                    audio_meta=audio_meta,
+                    transcript=transcript,
+                    gpt=gpt,
+                    markdown_cache_file=markdown_cache_file,
+                    link=link,
+                    screenshot=screenshot,
+                    formats=_format or [],
+                    style=style,
+                    extras=extras,
+                    video_img_urls=self.video_img_urls,
+                )
 
             # 4. 截图 & 链接替换
             if _format:
@@ -564,6 +583,241 @@ class NoteGenerator:
             results.append((match.group(0), total_seconds))
         return results
 
+    def _process_video_segments(
+        self,
+        video_path: str,
+        audio_meta: AudioDownloadResult,
+        gpt: GPT,
+        task_id: str,
+        link: bool,
+        screenshot: bool,
+        formats: List[str],
+        style: Optional[str],
+        extras: Optional[str],
+        grid_size: List[int],
+        video_interval: int,
+    ) -> Tuple[TranscriptResult, str]:
+        """
+        将视频分段处理，每段独立转写和总结，最后合并结果
+
+        Args:
+            video_path: 视频文件路径
+            audio_meta: 音频元信息
+            gpt: GPT 实例
+            task_id: 任务 ID
+            link: 是否插入链接
+            screenshot: 是否生成截图
+            formats: 格式选项列表
+            style: 笔记风格
+            extras: 额外参数
+            grid_size: 网格大小
+            video_interval: 视频间隔
+
+        Returns:
+            (合并后的转写结果, 合并后的Markdown文本)
+        """
+        logger.info("开始分段处理视频")
+
+        # 1. 分段视频
+        segment_paths = split_video_by_duration(video_path)
+        num_segments = len(segment_paths)
+
+        # 跟踪分段目录以便清理
+        if num_segments > 1:
+            segment_dir = os.path.dirname(segment_paths[0])
+            self._segment_dirs.append(segment_dir)
+
+        if num_segments == 1:
+            logger.info("视频无需分段，使用原流程")
+            # 只有一段，使用原流程
+            transcript_cache_file = NOTE_OUTPUT_DIR / f"{task_id}_transcript.json"
+            markdown_cache_file = NOTE_OUTPUT_DIR / f"{task_id}_markdown.md"
+
+            transcript = self._transcribe_audio(
+                audio_file=audio_meta.file_path,
+                transcript_cache_file=transcript_cache_file,
+                status_phase=TaskStatus.TRANSCRIBING,
+            )
+
+            markdown = self._summarize_text(
+                audio_meta=audio_meta,
+                transcript=transcript,
+                gpt=gpt,
+                markdown_cache_file=markdown_cache_file,
+                link=link,
+                screenshot=screenshot,
+                formats=formats,
+                style=style,
+                extras=extras,
+                video_img_urls=self.video_img_urls,
+            )
+            return transcript, markdown
+
+        logger.info(f"视频将分为 {num_segments} 段处理")
+
+        # 2. 处理每一段（带错误恢复）
+        all_segments = []
+        all_markdowns = []
+        failed_segments = []
+        segment_languages = []  # 跟踪每段的语言
+
+        for i, segment_path in enumerate(segment_paths):
+            logger.info(f"处理第 {i+1}/{num_segments} 段")
+
+            try:
+                # 更新状态
+                self._update_status(task_id, TaskStatus.TRANSCRIBING)
+
+                # 为每段生成缩略图（如果需要）
+                segment_img_urls = []
+                if grid_size:
+                    segment_img_urls = VideoReader(
+                        video_path=segment_path,
+                        grid_size=tuple(grid_size),
+                        frame_interval=video_interval,
+                        unit_width=1280,
+                        unit_height=720,
+                        save_quality=90,
+                    ).run()
+
+                # 转写该段的音频（需要从视频中提取音频）
+                segment_audio_file = self._extract_audio_from_video(segment_path)
+                segment_transcript = self.transcriber.transcript(file_path=segment_audio_file)
+
+                # 保存该段的语言信息
+                segment_languages.append(segment_transcript.language)
+
+                # 调整该段的时间戳（加上前面段的时长）- 必须在GPT总结之前
+                if i > 0:
+                    offset = i * SEGMENT_DURATION
+                    for seg in segment_transcript.segments:
+                        seg.start += offset
+                        seg.end += offset
+
+                # 更新状态
+                self._update_status(task_id, TaskStatus.SUMMARIZING)
+
+                # GPT 总结该段（此时GPT看到的是正确的时间戳）
+                segment_source = GPTSource(
+                    title=f"{audio_meta.title} (第{i+1}段/共{num_segments}段)",
+                    segment=segment_transcript.segments,
+                    tags=audio_meta.raw_info.get("tags", []),
+                    screenshot=screenshot,
+                    video_img_urls=segment_img_urls,
+                    link=link,
+                    _format=formats,
+                    style=style,
+                    extras=extras,
+                )
+                segment_markdown = gpt.summarize(segment_source)
+
+                all_segments.extend(segment_transcript.segments)
+                all_markdowns.append(segment_markdown)
+
+                logger.info(f"第 {i+1}/{num_segments} 段处理完成")
+
+            except Exception as e:
+                logger.error(f"第 {i+1}/{num_segments} 段处理失败：{e}")
+                failed_segments.append(i + 1)
+                # 继续处理下一段，而不是中断整个流程
+                continue
+
+        # 检查是否有失败的段
+        if failed_segments:
+            logger.warning(f"以下段处理失败：{failed_segments}，将使用已完成的部分生成笔记")
+            if not all_segments:
+                # 如果所有段都失败了，抛出异常
+                raise Exception("所有视频段处理失败，无法生成笔记")
+
+        # 如果没有成功处理的段，返回失败
+        if not all_segments:
+            raise Exception("没有成功处理任何视频段")
+
+        # 3. 合并转写结果
+        # 使用第一段的语言，如果没有则默认为 "zh"
+        merged_language = segment_languages[0] if segment_languages else "zh"
+
+        merged_transcript = TranscriptResult(
+            language=merged_language,
+            full_text=" ".join([seg.text for seg in all_segments]),
+            segments=all_segments,
+        )
+
+        # 4. 合并 Markdown
+        merged_markdown = self._merge_markdown_sections(
+            all_markdowns,
+            title=audio_meta.title,
+            num_segments=num_segments,
+            failed_segments=failed_segments,
+        )
+
+        # 5. 清理分段视频文件
+        self._cleanup_segment_files()
+
+        return merged_transcript, merged_markdown
+
+    def _extract_audio_from_video(self, video_path: str) -> str:
+        """从视频中提取音频，返回音频文件路径"""
+        import tempfile
+        output_dir = tempfile.gettempdir()
+        filename = os.path.basename(video_path)
+        name, _ = os.path.splitext(filename)
+        audio_path = os.path.join(output_dir, f"{name}_audio.mp3")
+
+        subprocess.run([
+            "ffmpeg", "-i", video_path,
+            "-vn",  # 不处理视频
+            "-acodec", "libmp3lame",  # MP3编码
+            "-y",  # 覆盖
+            audio_path
+        ], check=True, capture_output=True)
+
+        # 跟踪临时文件以便清理
+        self._temp_files.append(audio_path)
+        return audio_path
+
+    def _merge_markdown_sections(self, markdowns: List[str], title: str, num_segments: int, failed_segments: List[int] = None) -> str:
+        """合并多个段落的Markdown
+
+        Args:
+            markdowns: 每段的markdown内容
+            title: 视频标题
+            num_segments: 总段数
+            failed_segments: 失败的段索引列表
+        """
+        if failed_segments is None:
+            failed_segments = []
+
+        merged = f"# {title}\n\n"
+
+        # 添加处理说明
+        if failed_segments:
+            merged += f"> ⚠️ 该视频共分为 {num_segments} 段处理，其中第 {failed_segments} 段处理失败。以下是成功处理的段的内容\n\n"
+        else:
+            merged += f"> 该视频共分为 {num_segments} 段处理，以下是合并后的笔记内容\n\n"
+
+        # 计算实际段索引（跳过失败的段）
+        segment_index = 1
+        for i, md in enumerate(markdowns, 1):
+            # 简化：只跳过一级标题，保留其他所有内容
+            lines = md.split("\n")
+            content_lines = []
+            for line in lines:
+                # 跳过一级标题
+                if line.startswith("# "):
+                    continue
+                content_lines.append(line)
+
+            segment_content = "\n".join(content_lines).strip()
+            # 只在有内容时才添加
+            if segment_content:
+                # 使用原始段索引（1-based），即使某些段失败了
+                original_index = i
+                merged += f"## 第 {original_index} 段\n\n{segment_content}\n\n---\n\n"
+                segment_index += 1
+
+        return merged
+
     def _save_metadata(self, video_id: str, platform: str, task_id: str) -> None:
         """
         将生成的笔记任务记录插入数据库
@@ -577,3 +831,34 @@ class NoteGenerator:
             logger.info(f"已保存任务记录到数据库 (video_id={video_id}, platform={platform}, task_id={task_id})")
         except Exception as e:
             logger.error(f"保存任务记录失败：{e}")
+
+    def _cleanup_temp_files(self):
+        """清理临时音频文件"""
+        for temp_file in self._temp_files:
+            try:
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
+                    logger.debug(f"已清理临时文件：{temp_file}")
+            except Exception as e:
+                logger.warning(f"清理临时文件失败 {temp_file}：{e}")
+        self._temp_files.clear()
+
+    def _cleanup_segment_files(self):
+        """清理分段视频目录"""
+        import shutil
+        for segment_dir in self._segment_dirs:
+            try:
+                if os.path.exists(segment_dir):
+                    shutil.rmtree(segment_dir)
+                    logger.info(f"已清理分段视频目录：{segment_dir}")
+            except Exception as e:
+                logger.warning(f"清理分段目录失败 {segment_dir}：{e}")
+        self._segment_dirs.clear()
+
+    def __del__(self):
+        """析构函数，清理所有临时文件"""
+        try:
+            self._cleanup_temp_files()
+            self._cleanup_segment_files()
+        except:
+            pass

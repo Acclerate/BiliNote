@@ -9,6 +9,10 @@ from app.utils.logger import get_logger
 from app.utils.path_helper import get_app_dir
 
 logger = get_logger(__name__)
+
+# 视频分段配置
+SEGMENT_DURATION = 300  # 每段时长：5分钟（秒）
+
 class VideoReader:
     def __init__(self,
                  video_path: str,
@@ -138,5 +142,71 @@ class VideoReader:
         except Exception as e:
             logger.error(f"发生错误：{str(e)}")
             raise ValueError("视频处理失败")
+
+
+def split_video_by_duration(input_video_path: str, output_dir: str = None, segment_duration: int = SEGMENT_DURATION) -> list[str]:
+    """
+    将视频按指定时长分段，返回所有分段文件路径列表
+
+    Args:
+        input_video_path: 输入视频路径
+        output_dir: 输出目录（默认与输入文件同目录下的 segments 子目录）
+        segment_duration: 每段时长（秒），默认5分钟
+
+    Returns:
+        分段视频文件路径列表，如果视频短于分段时长则返回原路径
+    """
+    try:
+        # 获取视频时长
+        probe = ffmpeg.probe(input_video_path)
+        duration = float(probe["format"]["duration"])
+
+        # 如果视频短于分段时长，直接返回原路径
+        if duration <= segment_duration:
+            logger.info(f"视频时长 {duration:.1f}秒，无需分段")
+            return [input_video_path]
+
+        # 创建分段输出目录
+        if output_dir is None:
+            base_dir = os.path.dirname(input_video_path)
+            output_dir = os.path.join(base_dir, "segments")
+        os.makedirs(output_dir, exist_ok=True)
+
+        filename = os.path.basename(input_video_path)
+        name, ext = os.path.splitext(filename)
+
+        # 计算分段数量
+        num_segments = int(duration // segment_duration) + (1 if duration % segment_duration > 0 else 0)
+        logger.info(f"视频时长 {duration:.1f}秒，将分为 {num_segments} 段处理")
+
+        segment_paths = []
+
+        # 使用ffmpeg分段
+        for i in range(num_segments):
+            start_time = i * segment_duration
+            output_path = os.path.join(output_dir, f"{name}_part{i+1:02d}{ext}")
+
+            logger.info(f"生成第 {i+1}/{num_segments} 段：{start_time}s - {min(start_time + segment_duration, duration)}s")
+
+            subprocess.run([
+                "ffmpeg",
+                "-i", input_video_path,
+                "-ss", str(start_time),
+                "-t", str(segment_duration),
+                "-c", "copy",  # 复制编码，速度快
+                "-y",  # 覆盖输出文件
+                output_path
+            ], check=True, capture_output=True)
+
+            segment_paths.append(output_path)
+            logger.info(f"第 {i+1}/{num_segments} 段完成：{output_path}")
+
+        logger.info(f"视频分段完成，共 {len(segment_paths)} 段")
+        return segment_paths
+
+    except Exception as e:
+        logger.error(f"视频分段失败：{e}")
+        # 分段失败时返回原路径
+        return [input_video_path]
 
 

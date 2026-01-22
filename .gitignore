@@ -322,3 +322,11 @@ cython_debug/
 /backend/config/*
 /BiliNote_frontend/.idea/*
 /BiliNote_frontend/src-tauri/bin/
+uploads/*
+tmpclaude*
+note_results/*
+*.ps1
+/backend/app/db/*
+/static/screenshots/*
+bili_note.db
+/backend/app/db/builtin_providers.json
